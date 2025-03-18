@@ -1,0 +1,28 @@
+server:
+  port: 8090
+
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          keycloak:
+            client-id: iam-service
+            client-secret: PjZVuiUGzwsl6wbG45sGn1fsrTrfAYAJ
+            scope: openid
+            authorization-grant-type: authorization_code
+            redirect-uri: "http://localhost:8090/login/oauth2/code/keycloak"
+        provider:
+          keycloak:
+            issuer-uri: http://localhost:8080/realms/cdn
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8080/realms/cdn
+
+keycloak:
+  auth-server-url: http://localhost:8080
+  realm: cdn
+  client-id: iam-service
+  client-secret: PjZVuiUGzwsl6wbG45sGn1fsrTrfAYAJ
+  public-client: true
+  bearer-only: true
