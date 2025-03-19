@@ -19,6 +19,17 @@ spring:
         jwt:
           issuer-uri: http://localhost:8080/realms/cdn
 
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: user-sync-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
 keycloak:
   auth-server-url: http://localhost:8080
   realm: cdn
@@ -26,3 +37,29 @@ keycloak:
   client-secret: PjZVuiUGzwsl6wbG45sGn1fsrTrfAYAJ
   public-client: true
   bearer-only: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "*" # Exposes all Actuator endpoints
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: "IAM Service"
+    description: "User Authentication Service"
+    version: "1.0.0"
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha

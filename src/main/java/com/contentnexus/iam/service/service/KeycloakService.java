@@ -3,10 +3,12 @@ package com.contentnexus.iam.service.service;
 import com.contentnexus.iam.service.controller.AuthController;
 import com.contentnexus.iam.service.exception.UserAlreadyExistsException;
 import com.contentnexus.iam.service.model.User;
+import com.contentnexus.iam.service.model.UserEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
@@ -31,25 +33,29 @@ public class KeycloakService {
     @Value("${keycloak.client-secret}")
     private String clientSecret;
 
+    @Value("${kafka.user-topic}")
+    private String userTopic;
+
+    private final KafkaTemplate<String, UserEvent> kafkaTemplate;
+    private final static String USER_TOPIC = "user-topic";
+    private final RestTemplate restTemplate;
+    private static final Logger logger = LoggerFactory.getLogger(KeycloakService.class);
 
 
-    private final RestTemplate restTemplate = new RestTemplate();
-    private static final Logger logger = LoggerFactory.getLogger(AuthController.class);
+    public KeycloakService(KafkaTemplate<String, UserEvent> kafkaTemplate) {
+        this.kafkaTemplate = kafkaTemplate;
+        this.restTemplate = new RestTemplate();
+    }
 
     // 🔹 Register a new user in Keycloak
     public ResponseEntity<?> registerUser(User request) {
-        System.out.println("🔹 Registering user: " + request.getUsername());
-
-        if (request.getPassword() == null || request.getPassword().isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("❌ Error: Password is required.");
-        }
+        logger.info("🔹 Registering user: {}", request.getUsername());
 
         String adminToken = getServiceAccountAccessToken();
-
-        // 🔹 Check if user already exists
         String userId = getUserId(request.getUsername(), adminToken);
+
         if (userId != null) {
-            throw new UserAlreadyExistsException("User with username '" + request.getUsername() + "' already exists.");
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("User already exists.");
         }
 
         String url = keycloakServerUrl + "/admin/realms/" + realm + "/users";
@@ -59,21 +65,14 @@ public class KeycloakService {
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         String userJson = """
-        {
-            "username": "%s",
-            "email": "%s",
-            "firstName": "%s",
-            "lastName": "%s",
-            "enabled": true,
-            "credentials": [
-                {
-                    "type": "password",
-                    "value": "%s",
-                    "temporary": false
-                }
-            ]
-        }
-        """.formatted(request.getUsername(), request.getEmail(), request.getFirstName(), request.getLastName(), request.getPassword());
+    {
+        "username": "%s",
+        "email": "%s",
+        "firstName": "%s",
+        "lastName": "%s",
+        "enabled": true
+    }
+    """.formatted(request.getUsername(), request.getEmail(), request.getFirstName(), request.getLastName());
 
         HttpEntity<String> entity = new HttpEntity<>(userJson, headers);
         ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, entity, String.class);
@@ -81,9 +80,18 @@ public class KeycloakService {
         if (response.getStatusCode().is2xxSuccessful()) {
             userId = getUserId(request.getUsername(), adminToken);
             if (userId != null) {
-                assignRoleToUser(request.getUsername(), request.getRole(), adminToken);
-                assignUserToGroup(request.getUsername(), "users", adminToken);  // ✅ Assign to a specific group
-                return ResponseEntity.ok("✅ User registered successfully!");
+                // ✅ Set password for the user
+                setUserPassword(userId, request.getPassword(), adminToken);
+
+                // ✅ Assign user to a default group
+                assignUserToGroup(request.getUsername(), "users", adminToken);
+
+                // ✅ Publish user event to Kafka
+                UserEvent event = new UserEvent(userId, request.getUsername(), request.getEmail(), request.getFirstName(), request.getLastName(), request.getRole());
+                kafkaTemplate.send(userTopic, event);
+                logger.info("✅ User creation event published to Kafka: {}", event);
+
+                return ResponseEntity.ok("✅ User registered successfully and event published!");
             } else {
                 return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("❌ Error: User ID retrieval failed.");
             }
@@ -93,21 +101,77 @@ public class KeycloakService {
     }
 
 
+    // set User Password
+    private void setUserPassword(String userId, String password, String adminToken) {
+        String url = keycloakServerUrl + "/admin/realms/" + realm + "/users/" + userId + "/reset-password";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(adminToken);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        String passwordJson = """
+    {
+        "type": "password",
+        "temporary": false,
+        "value": "%s"
+    }
+    """.formatted(password);
+
+        HttpEntity<String> entity = new HttpEntity<>(passwordJson, headers);
+
+        try {
+            ResponseEntity<Void> response = restTemplate.exchange(url, HttpMethod.PUT, entity, Void.class);
+            if (response.getStatusCode().is2xxSuccessful()) {
+                logger.info("✅ Password set successfully for user: {}", userId);
+            } else {
+                logger.error("❌ Failed to set password for user: {} - Response: {}", userId, response);
+            }
+        } catch (HttpClientErrorException e) {
+            logger.error("❌ HTTP Error setting password: {} - {}", e.getStatusCode(), e.getResponseBodyAsString());
+        } catch (Exception e) {
+            logger.error("❌ Unexpected error setting password: {}", e.getMessage());
+        }
+    }
+
+
     // 🔹 Assign a User to a Group
     private void assignUserToGroup(String username, String groupName, String adminToken) {
+        logger.info("🔹 Assigning user '{}' to group '{}'", username, groupName);
+
         String userId = getUserId(username, adminToken);
-        if (userId == null) return;
+        if (userId == null) {
+            logger.error("❌ User '{}' not found in Keycloak", username);
+            return;
+        }
 
         String groupId = getGroupId(groupName, adminToken);
-        if (groupId == null) return;
+        if (groupId == null) {
+            logger.error("❌ Group '{}' not found in Keycloak", groupName);
+            return;
+        }
 
         String url = keycloakServerUrl + "/admin/realms/" + realm + "/users/" + userId + "/groups/" + groupId;
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(adminToken);
-        HttpEntity<Void> entity = new HttpEntity<>(headers);
+        headers.setContentType(MediaType.APPLICATION_JSON);
 
-        restTemplate.exchange(url, HttpMethod.PUT, entity, Void.class);
+        HttpEntity<String> entity = new HttpEntity<>("{}", headers);
+
+        try {
+            ResponseEntity<Void> response = restTemplate.exchange(url, HttpMethod.PUT, entity, Void.class);
+            logger.info("🔹 Response Status: {}", response.getStatusCode());
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                logger.info("✅ Successfully assigned user '{}' to group '{}'", username, groupName);
+            } else {
+                logger.warn("⚠️ Failed to assign user '{}' to group '{}'. Response: {}", username, groupName, response);
+            }
+        } catch (HttpClientErrorException e) {
+            logger.error("❌ HTTP Error assigning user to group: {} - Response: {}", e.getStatusCode(), e.getResponseBodyAsString());
+        } catch (Exception e) {
+            logger.error("❌ Unexpected error: {}", e.getMessage());
+        }
     }
 
     // 🔹 Get Group ID by Name
@@ -118,19 +182,23 @@ public class KeycloakService {
         headers.setBearerAuth(adminToken);
         HttpEntity<Void> entity = new HttpEntity<>(headers);
 
-        ResponseEntity<List> response = restTemplate.exchange(url, HttpMethod.GET, entity, List.class);
-        if (response.getBody() != null) {
-            for (Object obj : response.getBody()) {
-                Map<String, Object> group = (Map<String, Object>) obj;
-                if (groupName.equals(group.get("name"))) {
-                    return group.get("id").toString();
+        try {
+            ResponseEntity<List> response = restTemplate.exchange(url, HttpMethod.GET, entity, List.class);
+            logger.info("🔍 Retrieved Groups Response: {}", response.getBody());
+
+            if (response.getBody() != null) {
+                for (Object obj : response.getBody()) {
+                    Map<String, Object> group = (Map<String, Object>) obj;
+                    if (groupName.equals(group.get("name"))) {
+                        return group.get("id").toString();
+                    }
                 }
             }
+        } catch (Exception e) {
+            logger.error("❌ Error retrieving group ID: {}", e.getMessage());
         }
         return null;
     }
-
-
 
     // 🔹 Assign a role to the user
     private void assignRoleToUser(String username, String role, String adminToken) {
@@ -202,7 +270,7 @@ public class KeycloakService {
                 return response.getBody()[0].get("id").toString();
             }
         } catch (Exception e) {
-            System.err.println("❌ Error retrieving user ID: " + e.getMessage());
+            logger.error("❌ Error retrieving user ID: {}", e.getMessage());
         }
         return null;
     }
@@ -239,7 +307,7 @@ public class KeycloakService {
 
         String body = "client_id=" + clientId +
                 "&client_secret=" + clientSecret +
-                "&grant_type=client_credentials"; // 🔹 Use client_credentials grant
+                "&grant_type=client_credentials";
 
         HttpEntity<String> entity = new HttpEntity<>(body, headers);
 
@@ -254,7 +322,6 @@ public class KeycloakService {
             throw new RuntimeException("Service account authentication failed.");
         }
     }
-
 
     // 🔹 User Logout (Now correctly takes refreshToken, accessToken, and userId)
     public ResponseEntity<?> logout(String refreshToken, String accessToken, String userId) {
