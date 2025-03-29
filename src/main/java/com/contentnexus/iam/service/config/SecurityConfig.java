@@ -22,7 +22,8 @@ public class SecurityConfig {
                         .requestMatchers("/auth/login", "/auth/register").permitAll()  // Allow login & register
                         .requestMatchers("/auth/userinfo").hasAuthority("ROLE_USER")
                         .requestMatchers("/auth/logout").permitAll()
-                        .requestMatchers("/actuator/health", "/actuator/info","/actuator/beans", "/actuator/metrics","/actuator/env" ).permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+                        .requestMatchers("/actuator/**").hasRole("ADMIN")
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**").permitAll()
                         .anyRequest().authenticated()
                 )

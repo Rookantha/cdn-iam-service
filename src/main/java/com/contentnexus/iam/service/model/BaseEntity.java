@@ -1,14 +1,8 @@
 package com.contentnexus.iam.service.model;
 
-import lombok.Getter;
-import lombok.Setter;
-import lombok.ToString;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
-@Getter
-@Setter
-@ToString
 public abstract class BaseEntity {
     private String id;
     private LocalDateTime createdAt;
@@ -23,5 +17,31 @@ public abstract class BaseEntity {
     public BaseEntity(String id, LocalDateTime createdAt) {
         this.id = id;
         this.createdAt = createdAt;
+    }
+
+    // Getters and Setters
+    public String getId() {
+        return id;
+    }
+
+    public void setId(String id) {
+        this.id = id;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    // toString method
+    @Override
+    public String toString() {
+        return "BaseEntity{" +
+                "id='" + id + '\'' +
+                ", createdAt=" + createdAt +
+                '}';
     }
 }
